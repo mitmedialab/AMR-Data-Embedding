@@ -129,6 +129,7 @@ class Embed:
         self.remap()
 
         # add together sequence repeatedly to match length of cover file
+
         for num in self.embed_sequence:
             try:
                 seq = np.concatenate((seq, self.digit_sample_map[num]))
@@ -141,6 +142,8 @@ class Embed:
             repeat_seq = np.concatenate((repeat_seq, seq))
 
         repeat_seq = repeat_seq[:len(self.source)]
+
+        print "Length of Sequence to be Embedded", len(repeat_seq)
 
         if plot:
             plt.figure()
@@ -204,13 +207,14 @@ class Recover:
     # data_timeseries: timeseries of all waveforms used for embedding
     # digit_list: digits that correspond to waveform samples
     # embed_sequence: sequence in which those digits should have been embedded
-    def __init__(self, d_embed_timeseries, data_timeseries, digit_list, embed_sequence):
+    def __init__(self, d_embed_timeseries, data_timeseries, digit_list, embed_sequence, full_seq_length):
         self.all_idx = range(len(data_timeseries))
         self.d_embed_timeseries = d_embed_timeseries
         self.samples = data_timeseries
         self.digit_list = digit_list
 
         self.embed_sequence = embed_sequence
+        self.full_seq_length = full_seq_length
 
     # return bit sequence estimation based on cross-correlation and time interpolation
     def get_bit_sequence(self, thres=0.5, plot=False):
@@ -243,15 +247,64 @@ class Recover:
             # this will let us know about missing bits based on time intervals
             plt.figure()
             plt.stem(all_bits[:, 0], all_bits[:, 1])
-            plt.title("Recovered Sequence")
+            plt.title("Recovered Sequence: Raw")
+            plt.show()
+        #clean_bits = self.check_corr_errors(all_bits)
+        # conf = self.assign_confidence(all_bits, plot=True)
+        # clean_bits = self.clean_sequence(all_bits, conf)
+
+        clean_bits = self.clean_by_distance_confidence(all_bits)
+
+
+        if plot:
+            # this will let us know about missing bits based on time intervals
+            plt.figure()
+            plt.stem(clean_bits[:, 0], clean_bits[:, 1])
+            plt.title("Recovered Sequence: Cleaned")
             plt.show()
 
-        return all_bits[:,1]
+        return clean_bits[:,1]
 
 
-#if __name__ == "__main__":
-    # path_to_source = "audio_samples/woman2_orig.wav"
-    # sample_path_list = ['speech_samples/pronunciation_en_one.mp3']
+
+    # assign confidence values based on density of points
+    # NOTE: assume that we know length of sequence
+    def clean_by_distance_confidence(self, time_bits, thres=0.3):
+
+        def compute_dists(time_bits):
+            dists = []
+            for i in range(1, len(time_bits[:,0])):
+                dists.append([i,time_bits[i,0] - time_bits[i-1,0]])
+            return dists        
+
+        del_list = []
+        clean_bits = time_bits
+        for i in range(len(time_bits[:,1]) - self.full_seq_length):
+            dists_idxs = compute_dists(clean_bits)
+            s_dists_idxs = sorted(dists_idxs, key = lambda x: x[1])
+            #print "sorted dist_idxs", s_dists_idxs
+            del_idx = s_dists_idxs.pop(0)[0]
+            #print "del idx", del_idx
+            clean_bits = np.delete(clean_bits, del_idx, axis=0)
+            #print "clean_bits", clean_bits
+
+        return clean_bits
+
+    def get_recovery_estimate(self, predict_bit_seq):
+        ref_seq = self.embed_sequence
+        while len(ref_seq) < len(predict_bit_seq):
+            ref_seq = np.tile(ref_seq, 2)
+        ref_seq = ref_seq[:len(predict_bit_seq)]
+
+        print "ref sequence = ", ref_seq
+        print "predicted sequence = ", predict_bit_seq
+
+        matches = np.equal(predict_bit_seq, ref_seq)
+        return np.sum(matches) / float(len(matches))
+
+if __name__ == "__main__":
+    path_to_source = "audio_samples/man2_orig.wav"
+    sample_path_list = ['speech_samples/pronunciation_en_zero2.mp3','speech_samples/pronunciation_en_one.mp3']
     # E = Embed(path_to_source, sample_path_list, [1], [1,1])
 
     # # mess around with the codebook waveforms before embedding
@@ -273,3 +326,26 @@ class Recover:
     # R = Recover(d_embed, w, [1], [1,1])
     # final_sequence = R.get_bit_sequence(thres=0.7, plot=True)
     # print final_sequence
+
+    E2 = Embed(path_to_source, sample_path_list, [0,1], [0,1,1,1,0])
+
+    # mess around with the codebook waveforms before embedding
+    E2.truncate(0.4, idx_list=[0,1])
+    E2.energy(0.2, idx_list=[0])
+    E2.energy(0.3, idx_list=[1])
+    E2.pitch_shift(-15, idx_list=[1])
+    E2.pitch_shift(-15, idx_list=[0])
+
+    embed2 = E2.get_embedded_audio(plot=False)
+    d_embed2, sr = compress_and_decompress(embed2, "compression_samples/", plot=False)
+
+    # get the timeseries of the the original waveforms and recover
+    w2 = E2.get_data_timeseries()
+    # embedded sequence length
+    seq_len = 28
+    R2 = Recover(d_embed2, w2, [0,1], [0,1,1,1,0], seq_len)
+    final_sequence2 = R2.get_bit_sequence(thres=0.75, plot=True)
+    print "raw ", final_sequence2
+    print R2.get_recovery_estimate(final_sequence2)
+
+
