@@ -73,7 +73,7 @@ class Embed:
         self.digit_list = digit_list
 
         # self.samples = np.array(self.samples)
-        print [len(l) for l in self.samples]
+        #print [len(l) for l in self.samples]
 
         self.embed_sequence = embed_sequence
 
@@ -132,18 +132,19 @@ class Embed:
 
         for num in self.embed_sequence:
             try:
-                seq = np.concatenate((seq, self.digit_sample_map[num]))
+                seq = np.concatenate((seq, self.digit_sample_map[num]))                
             except UnboundLocalError:
                 seq = self.digit_sample_map[num]
 
+        sub_seq_len = len(seq)
         repeat_seq = seq
 
         while len(repeat_seq) < len(self.source):
             repeat_seq = np.concatenate((repeat_seq, seq))
 
         repeat_seq = repeat_seq[:len(self.source)]
-
-        print "Length of Sequence to be Embedded", len(repeat_seq)
+        num_total_digits = int( (float(len(repeat_seq)) / sub_seq_len) * len(self.embed_sequence) )
+        #print "Length of Sequence to be Embedded", num_total_digits
 
         if plot:
             plt.figure()
@@ -162,7 +163,7 @@ class Embed:
             plt.show()
 
         # add the sequence waveform to the cover waveform
-        return self.source + repeat_seq
+        return self.source + repeat_seq, num_total_digits
 
 
 #############################
@@ -249,9 +250,6 @@ class Recover:
             plt.stem(all_bits[:, 0], all_bits[:, 1])
             plt.title("Recovered Sequence: Raw")
             plt.show()
-        #clean_bits = self.check_corr_errors(all_bits)
-        # conf = self.assign_confidence(all_bits, plot=True)
-        # clean_bits = self.clean_sequence(all_bits, conf)
 
         clean_bits = self.clean_by_distance_confidence(all_bits)
 
@@ -296,8 +294,8 @@ class Recover:
             ref_seq = np.tile(ref_seq, 2)
         ref_seq = ref_seq[:len(predict_bit_seq)]
 
-        print "ref sequence = ", ref_seq
-        print "predicted sequence = ", predict_bit_seq
+        #print "ref sequence = ", ref_seq
+        #print "predicted sequence = ", predict_bit_seq
 
         matches = np.equal(predict_bit_seq, ref_seq)
         return np.sum(matches) / float(len(matches))
@@ -336,15 +334,14 @@ if __name__ == "__main__":
     E2.pitch_shift(-15, idx_list=[1])
     E2.pitch_shift(-15, idx_list=[0])
 
-    embed2 = E2.get_embedded_audio(plot=False)
+    embed2, num_total_digits = E2.get_embedded_audio(plot=False)
     d_embed2, sr = compress_and_decompress(embed2, "compression_samples/", plot=False)
 
     # get the timeseries of the the original waveforms and recover
     w2 = E2.get_data_timeseries()
     # embedded sequence length
-    seq_len = 28
-    R2 = Recover(d_embed2, w2, [0,1], [0,1,1,1,0], seq_len)
-    final_sequence2 = R2.get_bit_sequence(thres=0.75, plot=True)
+    R2 = Recover(d_embed2, w2, [0,1], [0,1,1,1,0], num_total_digits)
+    final_sequence2 = R2.get_bit_sequence(thres=0.75, plot=False)
     print "raw ", final_sequence2
     print R2.get_recovery_estimate(final_sequence2)
 
