@@ -171,7 +171,7 @@ class Embed:
 #   CLI Pipeline
 #############################
 
-def compress_and_decompress(embedded_signal, save_dir, plot=False, sample_rate=22050, n_fft=2048):
+def compress_and_decompress(embedded_signal, save_dir, plot=False, sample_rate=22050, n_fft=2048, store_files=False):
     time_stamp = str(time.time())
     
     librosa.output.write_wav(save_dir + "embedded_" + time_stamp + ".wav", embedded_signal, sample_rate)
@@ -185,6 +185,9 @@ def compress_and_decompress(embedded_signal, save_dir, plot=False, sample_rate=2
     subprocess.call(decompression_call, shell=True)
     
     decompressed_signal, sr = librosa.load(save_dir + "decompressed_" + time_stamp + ".wav")
+
+    if not store_files:
+        subprocess.call("rm compression_samples/*.*", shell=True)
 
     if plot:
         plt.figure()
@@ -220,30 +223,38 @@ class Recover:
     # return bit sequence estimation based on cross-correlation and time interpolation
     def get_bit_sequence(self, thres=0.5, plot=False):
         all_bits = []
-        for i, w in enumerate(self.samples):
-            # cross correlate each waveform with the source audio
-            corr = signal.correlate(self.d_embed_timeseries, w, mode='same')
 
-            # find peaks and collect timestamps (sample numbers)
-            indexes = peakutils.indexes(corr, thres=thres, min_dist=len(w)/2)
+        # a simple ECC - do we have too few bits or too many?
+        while len(all_bits) < self.full_seq_length:
 
-            if plot:
-                plt.figure()
-                plt.plot(corr)
-                plt.plot(indexes, corr[indexes], 'ro')
-                plt.title("Cross Correlation Post Compression for " + str(self.digit_list[i]))
-                plt.show()
+            for i, w in enumerate(self.samples):
+                # cross correlate each waveform with the source audio
+                corr = signal.correlate(self.d_embed_timeseries, w, mode='same')
 
-            digit = self.digit_list[i]
-            rec_digits = np.column_stack((indexes, np.repeat(digit, len(indexes))))
-            try:
-                all_bits = np.vstack((all_bits, rec_digits))
-            except:
-                all_bits = rec_digits
+                # find peaks and collect timestamps (sample numbers)
+                indexes = peakutils.indexes(corr, thres=thres, min_dist=len(w)/2)
 
-        # time interpolation - stack individual arrays and sort by time column
-        all_bits = all_bits[np.argsort(all_bits[:, 0])]
+                if plot:
+                    plt.figure()
+                    plt.plot(corr)
+                    plt.plot(indexes, corr[indexes], 'ro')
+                    plt.title("Cross Correlation Post Compression for " + str(self.digit_list[i]))
+                    plt.show()
 
+                digit = self.digit_list[i]
+                rec_digits = np.column_stack((indexes, np.repeat(digit, len(indexes))))
+                try:
+                    all_bits = np.vstack((all_bits, rec_digits))
+                except:
+                    all_bits = rec_digits
+
+            # time interpolation - stack individual arrays and sort by time column
+            all_bits = all_bits[np.argsort(all_bits[:, 0])]
+
+            thres = 0.95 * thres
+
+        
+        # if now too many, clean up by distance metric
         if plot:
             # this will let us know about missing bits based on time intervals
             plt.figure()
@@ -288,48 +299,52 @@ class Recover:
 
         return clean_bits
 
-    def get_recovery_estimate(self, predict_bit_seq):
+    def get_recovery_estimate(self, predict_bit_seq, conv=False, dump=False):
         ref_seq = self.embed_sequence
-        while len(ref_seq) < len(predict_bit_seq):
+        while len(ref_seq) < self.full_seq_length:
             ref_seq = np.tile(ref_seq, 2)
-        ref_seq = ref_seq[:len(predict_bit_seq)]
+        ref_seq = ref_seq[:self.full_seq_length]
 
-        #print "ref sequence = ", ref_seq
-        #print "predicted sequence = ", predict_bit_seq
+        if len(predict_bit_seq) != self.full_seq_length:
+            print "ERROR: Predicted Sequence Does NOT Equal Reference Sequence"
 
-        matches = np.equal(predict_bit_seq, ref_seq)
-        return np.sum(matches) / float(len(matches))
+        if dump:
+            print "Predicted Sequence: ", predict_bit_seq
+            print "Reference Sequence: ", ref_seq
+
+        if conv:
+            correct_blocks = 0
+            i = 0
+            while i < len(predict_bit_seq):
+                try:
+                    block_is_correct = np.all(np.equal(predict_bit_seq[i:i+len(self.embed_sequence)], self.embed_sequence))
+                except:
+                    block_is_correct = np.all(np.equal(predict_bit_seq[i:], self.embed_sequence[:len(predict_bit_seq) - i]))
+
+                if block_is_correct:
+                    i += len(self.embed_sequence)
+                    correct_blocks +=1
+                else:
+                    i += 1
+
+            total_blocks = np.ceil(self.full_seq_length / float(len(self.embed_sequence)))
+
+            return correct_blocks / float(total_blocks)
+
+        else:         
+
+            matches = np.equal(predict_bit_seq, ref_seq)
+            return np.sum(matches) / float(len(matches))
 
 if __name__ == "__main__":
     path_to_source = "audio_samples/man2_orig.wav"
     sample_path_list = ['speech_samples/pronunciation_en_zero2.mp3','speech_samples/pronunciation_en_one.mp3']
-    # E = Embed(path_to_source, sample_path_list, [1], [1,1])
-
-    # # mess around with the codebook waveforms before embedding
-    # E.truncate(0.7, idx_list=[0])
-    # print "Sample Lengths: "
-    # for samp in E.samples:
-    #     print len(samp)
-
-    # print "Source Length: "
-    # print len(E.source)
-    # E.energy(0.2, idx_list=[0])
-    # E.pitch_shift(-15, idx_list=[0])
-
-    # embed = E.get_embedded_audio(plot=True)
-    # d_embed, sr = compress_and_decompress(embed, "compression_samples/", plot=True)
-
-    # # get the timeseries of the the original waveforms and recover
-    # w = E.get_data_timeseries()
-    # R = Recover(d_embed, w, [1], [1,1])
-    # final_sequence = R.get_bit_sequence(thres=0.7, plot=True)
-    # print final_sequence
 
     E2 = Embed(path_to_source, sample_path_list, [0,1], [0,1,1,1,0])
 
     # mess around with the codebook waveforms before embedding
     E2.truncate(0.4, idx_list=[0,1])
-    E2.energy(0.2, idx_list=[0])
+    E2.energy(0.3, idx_list=[0])
     E2.energy(0.3, idx_list=[1])
     E2.pitch_shift(-15, idx_list=[1])
     E2.pitch_shift(-15, idx_list=[0])
@@ -343,6 +358,8 @@ if __name__ == "__main__":
     R2 = Recover(d_embed2, w2, [0,1], [0,1,1,1,0], num_total_digits)
     final_sequence2 = R2.get_bit_sequence(thres=0.75, plot=False)
     print "raw ", final_sequence2
-    print R2.get_recovery_estimate(final_sequence2)
+    print "Bit Accuracy: ", R2.get_recovery_estimate(final_sequence2, dump=True, conv=False)
+    print "Convolutional Accuracy: ", R2.get_recovery_estimate(final_sequence2, dump=True, conv=True)
+
 
 
