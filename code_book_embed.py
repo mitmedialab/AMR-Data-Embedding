@@ -32,6 +32,7 @@ import os
 import peakutils
 
 from scipy import signal
+from scipy.optimize import curve_fit
 
 #######################
 # Visualization Tools
@@ -50,6 +51,136 @@ def view_sample(path_to_sample):
     plt.title(path_to_sample)
     plt.plot(sample)
     plt.show()
+
+##########################################
+# Generate Longitude / Latitude Sequence
+#  (7,4) Hamming Encoding / Decoding
+#   NOTE: does not have sign bit
+##########################################
+
+class Encode:
+    def make_embed_sequence(self,lo, la):
+        blo, bla = self.make_binary(lo,la)
+        hd_lo, hd_la = self.hammingify(blo, bla)
+        return np.concatenate((blo, bla)), np.concatenate((hd_lo, hd_la))
+
+    # convert longitude and latitude to binary representation
+    def make_binary(self,lo,la):
+        bin_digits_lo = list('{0:08b}'.format(lo))
+        bin_digits_la = list('{0:08b}'.format(la))
+        
+        print bin_digits_lo
+        
+        bin_digits_lo = [int(x) for x in bin_digits_lo]
+        bin_digits_la = [int(x) for x in bin_digits_la]
+        
+        return np.array(bin_digits_lo), np.array(bin_digits_la)
+
+    # simple Hamming (7,4) encoder
+    def hammingify(self, bin_digits_lo, bin_digits_la):
+        # generator matrix
+        G = np.array([[0,1,1,1,0,0,0],
+                    [1,0,1,0,1,0,0],
+                    [1,1,0,0,0,1,0],
+                    [1,1,1,0,0,0,1]])
+        
+        hamming_digits_lo = []
+        i = 0
+        while i < len(bin_digits_lo):
+            print bin_digits_lo[i:i+4]
+            hamming_wrd = np.dot(bin_digits_lo[i:i+4], G) % 2
+        
+            hamming_digits_lo = np.concatenate((hamming_digits_lo, hamming_wrd))
+            i += 4
+            
+        
+        hamming_digits_la = []
+        i = 0
+        while i < len(bin_digits_la):
+            hamming_wrd = np.dot(bin_digits_la[i:i+4].T, G) % 2
+            hamming_digits_la = np.concatenate((hamming_digits_la, hamming_wrd))
+            i += 4
+            
+        return hamming_digits_lo, hamming_digits_la
+
+class Decode:
+    def compute_num_lon_lat(self, recovered_sequence):
+        hamming_digits_lo = recovered_sequence[:len(recovered_sequence) / 2]
+        hamming_digits_la = recovered_sequence[len(recovered_sequence) / 2: len(recovered_sequence)]
+        bdlo, bdla = self.dehammingify(hamming_digits_lo, hamming_digits_la)
+        lon_dec, lat_dec = self.get_long_lat(bdlo, bdla)
+        return np.concatenate((bdlo, bdla)), lon_dec, lat_dec
+
+    # simple hamming (7,4) decoder
+    def dehammingify(self, hamming_digits_lo, hamming_digits_la):
+        # syndrome generator matrix
+        H = np.array([[1,0,0,0,1,1,1],
+                      [0,1,0,1,0,1,1],
+                      [0,0,1,1,1,0,1]])
+        
+        bin_data_lo = []
+        i = 0
+        while i < len(hamming_digits_lo):
+            hamming_wrd = hamming_digits_lo[i:i+7]
+            synd = np.dot(H, hamming_wrd) % 2
+            if np.all(synd == 0):
+                data = hamming_wrd[3:]
+            elif synd in H.T:
+                for m, vec in enumerate(H.T):
+                    if np.all(vec == synd):
+                        toggle_bit = m
+                hamming_wrd[toggle_bit] = int(not(hamming_wrd[toggle_bit]))
+                data = hamming_wrd[3:]
+            else:
+                # more than one bit flipped, can't correct
+                print "Error Block"
+                data = hamming_wrd[3:]
+
+            bin_data_lo = np.concatenate((bin_data_lo, data))
+            i += 7
+            
+        bin_data_la = []
+        i = 0
+        while i < len(hamming_digits_la):
+            hamming_wrd = hamming_digits_la[i:i+7]
+            synd = np.dot(H, hamming_wrd) % 2
+            if np.all(synd == 0):
+                data = hamming_wrd[3:]
+            elif synd in H.T:
+                for m, vec in enumerate(H.T):
+                    if np.all(vec == synd):
+                        toggle_bit = m
+                hamming_wrd[toggle_bit] = int(not(hamming_wrd[toggle_bit]))
+                data = hamming_wrd[3:]
+            else:
+                # more than one bit flipped, can't correct
+                print "Error Block"
+                data = hamming_wrd[3:]
+
+            bin_data_la = np.concatenate((bin_data_la, data))
+            i += 7
+            
+        return bin_data_lo, bin_data_la
+
+
+    def get_long_lat(self, lon, lat):
+        lon_str = ""
+        lat_str = ""
+        for elem in lon:
+            lon_str += str(int(elem))
+            
+        for elem in lat:
+            lat_str += str(int(elem))
+            
+        print lon_str
+        print lat_str
+        lon_dec = int("0b" + lon_str,2)
+        lat_dec = int("0b" + lat_str,2)
+        return lon_dec, lat_dec
+
+    def get_hamming_accuracy(self, orig, decoded):
+        matches = np.equal(orig, decoded)
+        return np.sum(matches) / float(len(matches))
 
 #######################
 # Embed Waveforms
@@ -129,26 +260,32 @@ class Embed:
         self.remap()
 
         # add together sequence repeatedly to match length of cover file
+        seq = []
+        num_total_digits = 0
+        embedded_audio = None
+        while embedded_audio == None:
+            for num in self.embed_sequence:
+                # check if the new concatenation will exceed length
+                if len(np.concatenate((seq, self.digit_sample_map[num]))) > len(self.source):
+                    embedded_audio = self.source[:len(seq)] + seq
+                    break
+                else:
+                    seq = np.concatenate((seq, self.digit_sample_map[num]))
+                    num_total_digits += 1                
 
-        for num in self.embed_sequence:
-            try:
-                seq = np.concatenate((seq, self.digit_sample_map[num]))                
-            except UnboundLocalError:
-                seq = self.digit_sample_map[num]
+        # sub_seq_len = len(seq)
+        # repeat_seq = seq
 
-        sub_seq_len = len(seq)
-        repeat_seq = seq
+        # while len(repeat_seq) < len(self.source):
+        #     repeat_seq = np.concatenate((repeat_seq, seq))
 
-        while len(repeat_seq) < len(self.source):
-            repeat_seq = np.concatenate((repeat_seq, seq))
-
-        repeat_seq = repeat_seq[:len(self.source)]
-        num_total_digits = int( (float(len(repeat_seq)) / sub_seq_len) * len(self.embed_sequence) )
+        # repeat_seq = repeat_seq[:len(self.source)]
+        # num_total_digits = int( np.ceil( (float(len(repeat_seq)) / sub_seq_len) * len(self.embed_sequence) ) )
         #print "Length of Sequence to be Embedded", num_total_digits
 
         if plot:
             plt.figure()
-            plt.plot(repeat_seq)
+            plt.plot(seq)
             plt.title("Sequence to be Embedded")
             plt.show()
 
@@ -158,12 +295,13 @@ class Embed:
             plt.show()
 
             plt.figure()
-            plt.plot(repeat_seq + self.source)
+            plt.plot(embedded_audio)
             plt.title("Embedded Audio")
             plt.show()
 
         # add the sequence waveform to the cover waveform
-        return self.source + repeat_seq, num_total_digits
+        #return self.source + repeat_seq, num_total_digits
+        return embedded_audio, num_total_digits
 
 
 #############################
@@ -220,6 +358,44 @@ class Recover:
         self.embed_sequence = embed_sequence
         self.full_seq_length = full_seq_length
 
+    # get raw ratio of bits recovered after correlation -- NO time correction
+    # Use ONLY for waveform optimizations, with single digit/ waveform
+    def get_raw_bits_recovered(self, thres=0.5, plot=False):
+        all_bits = []
+
+        for i, w in enumerate(self.samples):
+            # cross correlate each waveform with the source audio
+            corr = signal.correlate(self.d_embed_timeseries, w, mode='same')
+
+            # find peaks and collect timestamps (sample numbers)
+            indexes = peakutils.indexes(corr, thres=thres, min_dist=len(w)/2)
+
+            if plot:
+                plt.figure()
+                plt.plot(corr)
+                plt.plot(indexes, corr[indexes], 'ro')
+                plt.title("Cross Correlation Post Compression for " + str(self.digit_list[i]))
+                plt.show()
+
+            digit = self.digit_list[i]
+            rec_digits = np.column_stack((indexes, np.repeat(digit, len(indexes))))
+            try:
+                all_bits = np.vstack((all_bits, rec_digits))
+            except:
+                all_bits = rec_digits
+
+
+        # time interpolation - stack individual arrays and sort by time column
+        #all_bits = all_bits[np.argsort(all_bits[:, 0])]
+
+        if plot:
+            print "all_bits", all_bits
+            print "full sequence length", self.full_seq_length
+
+        return len(all_bits) / float(self.full_seq_length)
+
+
+
     # return bit sequence estimation based on cross-correlation and time interpolation
     def get_bit_sequence(self, thres=0.5, plot=False):
         all_bits = []
@@ -232,14 +408,15 @@ class Recover:
                 corr = signal.correlate(self.d_embed_timeseries, w, mode='same')
 
                 # find peaks and collect timestamps (sample numbers)
-                indexes = peakutils.indexes(corr, thres=thres, min_dist=len(w)/2)
+                #indexes = peakutils.indexes(corr, thres=thres, min_dist=len(w)/2)
+                indexes = peakutils.indexes(corr, thres=thres, min_dist=len(w))
 
                 if plot:
                     plt.figure()
                     plt.plot(corr)
                     plt.plot(indexes, corr[indexes], 'ro')
                     plt.title("Cross Correlation Post Compression for " + str(self.digit_list[i]))
-                    plt.show()
+                    plt.show()                
 
                 digit = self.digit_list[i]
                 rec_digits = np.column_stack((indexes, np.repeat(digit, len(indexes))))
@@ -338,14 +515,20 @@ class Recover:
 
 if __name__ == "__main__":
     path_to_source = "audio_samples/man2_orig.wav"
-    sample_path_list = ['speech_samples/pronunciation_en_zero2.mp3','speech_samples/pronunciation_en_one.mp3']
+    sample_path_list = ['speech_samples/angrez/pronunciation_en_zero2.mp3','speech_samples/angrez/pronunciation_en_one.mp3']
 
-    E2 = Embed(path_to_source, sample_path_list, [0,1], [0,1,1,1,0])
+    e = Encode()
+    bin_data, seq = e.make_embed_sequence(103, 45)
+    # corrupt one bit
+    seq[6] = int(not(seq[6]))
+
+
+    E2 = Embed(path_to_source, sample_path_list, [0,1], seq)
 
     # mess around with the codebook waveforms before embedding
     E2.truncate(0.4, idx_list=[0,1])
-    E2.energy(0.3, idx_list=[0])
-    E2.energy(0.3, idx_list=[1])
+    E2.energy(0.2, idx_list=[0])
+    E2.energy(0.2, idx_list=[1])
     E2.pitch_shift(-15, idx_list=[1])
     E2.pitch_shift(-15, idx_list=[0])
 
@@ -355,11 +538,17 @@ if __name__ == "__main__":
     # get the timeseries of the the original waveforms and recover
     w2 = E2.get_data_timeseries()
     # embedded sequence length
-    R2 = Recover(d_embed2, w2, [0,1], [0,1,1,1,0], num_total_digits)
+    R2 = Recover(d_embed2, w2, [0,1], seq, num_total_digits)
     final_sequence2 = R2.get_bit_sequence(thres=0.75, plot=False)
     print "raw ", final_sequence2
     print "Bit Accuracy: ", R2.get_recovery_estimate(final_sequence2, dump=True, conv=False)
     print "Convolutional Accuracy: ", R2.get_recovery_estimate(final_sequence2, dump=True, conv=True)
+
+    d = Decode()
+    decode_bin_data, lon_num, lat_num = d.compute_num_lon_lat(seq)
+    print "decoded with hamming: ", (lon_num, lat_num)
+    acc = d.get_hamming_accuracy(bin_data, decode_bin_data)
+    print "hamming acc: ", acc
 
 
 
